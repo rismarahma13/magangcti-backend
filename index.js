@@ -39,9 +39,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Limit Body untuk Base64
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ limit: "10mb", extended: true }));
+// Limit Body (Ditingkatkan menjadi 50mb untuk menampung upload file asli)
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // ==========================================================
 // 2. INISIALISASI SUPABASE CLIENT
@@ -51,21 +51,41 @@ const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ==========================================================
-// 3. KONFIGURASI UPLOAD (MEMORY STORAGE - BASE64)
+// 3. KONFIGURASI UPLOAD & HELPER STORAGE
 // ==========================================================
 const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 4 * 1024 * 1024 }, // Max 4MB
+  limits: { fileSize: 5 * 1024 * 1024 }, // Batasi 5MB per file
 });
+
+// Fungsi Helper untuk upload file asli ke Supabase Storage Bucket
+const uploadToSupabase = async (file, bucketName, folder) => {
+  const fileExt = file.originalname.split(".").pop();
+  const fileName = `${folder}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+
+  const { data, error } = await supabase.storage
+    .from(bucketName)
+    .upload(fileName, file.buffer, {
+      contentType: file.mimetype,
+      upsert: true,
+    });
+
+  if (error) throw error;
+
+  const { data: publicUrl } = supabase.storage
+    .from(bucketName)
+    .getPublicUrl(fileName);
+  return publicUrl.publicUrl;
+};
 
 // ==========================================================
 // 4. ROUTES API
 // ==========================================================
 
-// --- HOME ROUTE (Untuk cek apakah backend hidup) ---
+// --- HOME ROUTE ---
 app.get("/", (req, res) => {
-  res.json({ message: "Backend Magang CTI is Running! 🚀" });
+  res.json({ message: "Backend Magang CTI is Running with File Storage! 🚀" });
 });
 
 // --- A. AUTHENTICATION ---
@@ -245,21 +265,22 @@ app.delete("/users/:id", async (req, res) => {
   }
 });
 
-// UPDATE PROFILE
+// UPDATE PROFILE (DENGAN FILE ASLI)
 app.put(
   "/update-profile/:id",
   upload.single("foto_profil"),
   async (req, res) => {
     const { id } = req.params;
     const { nama_lengkap, no_hp, password } = req.body;
-
     let updateData = { nama_lengkap, no_hp };
 
-    if (req.file) {
-      updateData.foto_profil = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
-    }
-
     try {
+      if (req.file) {
+        // UPLOAD FILE ASLI KE STORAGE
+        const fileUrl = await uploadToSupabase(req.file, "uploads", "profiles");
+        updateData.foto_profil = fileUrl;
+      }
+
       if (password && password.trim() !== "") {
         const salt = await bcrypt.genSalt(10);
         updateData.password = await bcrypt.hash(password, salt);
@@ -437,14 +458,16 @@ app.get("/placement-detail/:userId", async (req, res) => {
   }
 });
 
-// --- E. LOGBOOK ---
+// --- E. LOGBOOK (DENGAN FILE ASLI) ---
 app.post("/logbook", upload.single("bukti_foto"), async (req, res) => {
   try {
     const { user_id, kegiatan, tanggal, kehadiran } = req.body;
-    const bukti_foto = req.file
-      ? `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`
-      : null;
-    const statusHadir = kehadiran || "Hadir";
+    let bukti_foto_url = null;
+
+    if (req.file) {
+      // UPLOAD FILE ASLI KE STORAGE
+      bukti_foto_url = await uploadToSupabase(req.file, "uploads", "logbooks");
+    }
 
     const { data, error } = await supabase
       .from("logbooks")
@@ -453,9 +476,9 @@ app.post("/logbook", upload.single("bukti_foto"), async (req, res) => {
           user_id,
           tanggal,
           kegiatan,
-          bukti_foto,
+          bukti_foto: bukti_foto_url,
           status: "menunggu",
-          kehadiran: statusHadir,
+          kehadiran: kehadiran || "Hadir",
         },
       ])
       .select()
@@ -489,12 +512,7 @@ app.get("/all-logbooks", async (req, res) => {
       .select(`*, user:user_id(nama_lengkap)`)
       .order("tanggal", { ascending: false });
     if (error) throw error;
-
-    const formatted = data.map((l) => ({
-      ...l,
-      nama_lengkap: l.user?.nama_lengkap,
-    }));
-    res.json(formatted);
+    res.json(data.map((l) => ({ ...l, nama_lengkap: l.user?.nama_lengkap })));
   } catch (e) {
     res.status(500).json(e.message);
   }
@@ -504,10 +522,11 @@ app.put("/logbook/:id", upload.single("bukti_foto"), async (req, res) => {
   try {
     const { id } = req.params;
     const { kegiatan, tanggal, kehadiran } = req.body;
-
     let updateData = { tanggal, kegiatan, kehadiran: kehadiran || "Hadir" };
+
     if (req.file) {
-      updateData.bukti_foto = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+      const fileUrl = await uploadToSupabase(req.file, "uploads", "logbooks");
+      updateData.bukti_foto = fileUrl;
     }
 
     const { error } = await supabase
@@ -635,7 +654,6 @@ app.get("/admin/rekap-nilai", async (req, res) => {
     const { data: places } = await supabase
       .from("placements")
       .select("user_id, company:company_id(nama_perusahaan)");
-
     const placesMap = {};
     if (places) {
       places.forEach(
@@ -643,44 +661,44 @@ app.get("/admin/rekap-nilai", async (req, res) => {
       );
     }
 
-    const formatted = evals.map((e) => ({
-      nama_lengkap: e.user?.nama_lengkap,
-      nim: e.user?.nim,
-      jurusan: e.user?.jurusan,
-      nama_perusahaan: placesMap[e.user_id] || "-",
-      nilai_disiplin: e.nilai_disiplin,
-      nilai_kerjasama: e.nilai_kerjasama,
-      nilai_teknis: e.nilai_teknis,
-      rata_rata: e.rata_rata,
-      predikat: e.predikat,
-    }));
-
-    res.json(formatted);
+    res.json(
+      evals.map((e) => ({
+        nama_lengkap: e.user?.nama_lengkap,
+        nim: e.user?.nim,
+        jurusan: e.user?.jurusan,
+        nama_perusahaan: placesMap[e.user_id] || "-",
+        nilai_disiplin: e.nilai_disiplin,
+        nilai_kerjasama: e.nilai_kerjasama,
+        nilai_teknis: e.nilai_teknis,
+        rata_rata: e.rata_rata,
+        predikat: e.predikat,
+      })),
+    );
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- G. LAPORAN & STATS ---
+// --- G. LAPORAN & STATS (FILE ASLI) ---
 app.post("/upload-laporan", upload.single("file_laporan"), async (req, res) => {
   try {
-    const laporan_akhir = req.file
-      ? `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`
-      : null;
-    if (!laporan_akhir)
+    if (!req.file)
       return res.status(400).json({ error: "File tidak ditemukan" });
+
+    // UPLOAD FILE ASLI KE STORAGE
+    const fileUrl = await uploadToSupabase(req.file, "uploads", "laporan");
 
     const { error } = await supabase
       .from("users")
       .update({
-        laporan_akhir,
+        laporan_akhir: fileUrl,
         tgl_upload_laporan: new Date().toISOString(),
         status_laporan: "pending",
       })
       .eq("id", req.body.user_id);
 
     if (error) throw error;
-    res.json({ msg: "Uploaded" });
+    res.json({ msg: "Uploaded", url: fileUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -736,21 +754,13 @@ app.get("/admin/stats", async (req, res) => {
         .match(match);
       return count || 0;
     };
-
-    const total_peserta = await getCount("users", { role: "peserta" });
-    const total_supervisor = await getCount("users", { role: "supervisor" });
-    const total_logbooks = await getCount("logbooks");
-    const total_lulus = await getCount("evaluations");
-    const total_perusahaan = await getCount("companies");
-    const total_placed = await getCount("placements");
-
     res.json({
-      total_peserta,
-      total_supervisor,
-      total_logbooks,
-      total_lulus,
-      total_perusahaan,
-      total_placed,
+      total_peserta: await getCount("users", { role: "peserta" }),
+      total_supervisor: await getCount("users", { role: "supervisor" }),
+      total_logbooks: await getCount("logbooks"),
+      total_lulus: await getCount("evaluations"),
+      total_perusahaan: await getCount("companies"),
+      total_placed: await getCount("placements"),
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -759,7 +769,9 @@ app.get("/admin/stats", async (req, res) => {
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server berjalan di port ${PORT} (Menggunakan Supabase API)`);
+  console.log(
+    `🚀 Server berjalan di port ${PORT} (Menggunakan Supabase API + Storage)`,
+  );
 });
 
 module.exports = app;
