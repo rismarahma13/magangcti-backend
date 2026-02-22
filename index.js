@@ -7,20 +7,51 @@ const bcrypt = require("bcrypt");
 
 const app = express();
 
-// Konfigurasi CORS & Limit Body untuk Base64
-app.use(cors({ origin: "*" }));
+// ==========================================================
+// 1. KONFIGURASI CORS (SOLUSI FIX ERROR BROWSER)
+// ==========================================================
+app.use(
+  cors({
+    origin: "*", // Mengizinkan semua domain (termasuk localhost kamu)
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+    ],
+    credentials: true,
+  }),
+);
+
+// Middleware tambahan untuk memastikan Preflight Request (OPTIONS) selalu dijawab 200 OK
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Requested-With, Accept",
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
+// Limit Body untuk Base64
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 // ==========================================================
-// 1. INISIALISASI SUPABASE CLIENT
+// 2. INISIALISASI SUPABASE CLIENT
 // ==========================================================
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
 
 // ==========================================================
-// 2. KONFIGURASI UPLOAD (MEMORY STORAGE - BASE64)
+// 3. KONFIGURASI UPLOAD (MEMORY STORAGE - BASE64)
 // ==========================================================
 const storage = multer.memoryStorage();
 const upload = multer({
@@ -29,8 +60,13 @@ const upload = multer({
 });
 
 // ==========================================================
-// 3. ROUTES API (FULL SUPABASE REWORK)
+// 4. ROUTES API
 // ==========================================================
+
+// --- HOME ROUTE (Untuk cek apakah backend hidup) ---
+app.get("/", (req, res) => {
+  res.json({ message: "Backend Magang CTI is Running! 🚀" });
+});
 
 // --- A. AUTHENTICATION ---
 app.post("/login", async (req, res) => {
@@ -324,7 +360,6 @@ app.get("/placements", async (req, res) => {
     `);
     if (error) throw error;
 
-    // Formatting agar sesuai dengan ekspektasi Frontend
     const formatted = data.map((p) => ({
       id: p.id,
       user_id: p.user_id,
@@ -601,7 +636,6 @@ app.get("/admin/rekap-nilai", async (req, res) => {
       .from("placements")
       .select("user_id, company:company_id(nama_perusahaan)");
 
-    // Mapping Company
     const placesMap = {};
     if (places) {
       places.forEach(
